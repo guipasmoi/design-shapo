@@ -1,0 +1,159 @@
+// INITIALIZATION
+// The stores already communicate and synchronize asynchronously.
+// A and B exchange announcements through the master.
+// "Master" is a synchronization hub, not an authority that resolves conflicts.
+
+const store_a = open_store("customers-a");
+const store_b = open_store("customers-b");
+const store_master = open_store("customers-master");
+
+const store_a_customer_type = store_a.get<Customer>();
+const store_b_customer_type = store_b.get<Customer>();
+const store_master_customer_type = store_master.get<Customer>();
+
+// LOCAL DOCUMENT CREATION
+
+const store_a_customer_1_new = store_a.create_document({ type: store_a_customer_type });
+
+const store_a_customer_1_v1 = store_a_customer_1_new.set(
+    `
+    {
+        "parent_sha": null,
+        "name": "Alice Martin",
+        "email": "alice@example.com"
+    }
+    `
+);
+
+await store_a_customer_1_v1.await.localCommit();
+
+// SYNCHRONIZATION
+// Stores exchange existing references and announce subsequent changes.
+// No explicit pull or document selection is required in the user API.
+// Transport setup is outside this example; stores manage their local heads.
+// Each store keeps its own head for the same document GUID.
+// Announce GUID -> SHA and the exact definition context before transferring content.
+// Track the announcing peer separately from peers advertising content availability.
+// A document reference may be known while its content is still missing locally.
+// Fetch missing content and history internally, on demand or in the background.
+// Verify received content against its SHA before marking it locally available.
+// Verify ancestry before advancing a head; otherwise keep the announcement pending.
+// Head updates remain atomic; previously obtained version views stay unchanged.
+// Preserve conflicting branches; arrival order does not choose a winner.
+// The type's versioned policy handles ordinary conflicts.
+// A set-specific resolveConflict callback may propose a local exception.
+// The callback is not transmitted; the validated resolution is announced instead.
+// Await methods follow this exact version, even if its resolution creates a new one.
+// The following reads occur after the described notifications have been processed.
+
+// 1. INITIAL ANNOUNCEMENT: A -> master -> B.
+
+// Notification: the master learns the document GUID, SHA, and definition from A.
+// A advertises that it holds the content; the master need not download it yet.
+await store_a_customer_1_v1.await.referenceAcknowledged({ by: store_master });
+const store_master_customer_1_v1 = store_master.get<Customer>(store_a_customer_1_v1.guid);
+
+// Notification: B learns the reference via the master, with A as a content source.
+// Forwarding this announcement does not imply that the master holds the content.
+await store_a_customer_1_v1.await.referenceAcknowledged({ by: store_b });
+const store_b_customer_1_v1 = store_b.get<Customer>(store_a_customer_1_v1.guid);
+
+// 2. FAST-FORWARD: a new version travels from A through the master to B.
+
+const store_a_customer_1_v2 = store_a_customer_1_v1.set(
+    `
+    {
+        "parent_sha": "${store_a_customer_1_v1.sha()}",
+        "name": "Alice Martin",
+        "email": "alice.martin@example.com"
+    }
+    `
+);
+
+await store_a_customer_1_v2.await.localCommit();
+
+// Notification: the master learns v2 and fetches the history needed to verify it.
+// After verification, its local head advances to v2.
+await store_a_customer_1_v2.await.resolved({ by: store_master });
+const store_master_customer_1_v2 = store_master_customer_1_v1.head();
+
+// Notification: B learns v2 via the master and verifies the same ancestry.
+await store_a_customer_1_v2.await.resolved({ by: store_b });
+const store_b_customer_1_v2 = store_b_customer_1_v1.head();
+
+// 3. CONFLICT: both writes occur before either peer receives the other's update.
+// B has obtained the v2 content and definition needed for this local write.
+// In this scenario, the type policy leaves the special case open for application input.
+
+const store_a_customer_1_v3 = store_a_customer_1_v2.set(
+    `
+    {
+        "parent_sha": "${store_a_customer_1_v2.sha()}",
+        "name": "Alice Martin",
+        "email": "alice.office@example.com"
+    }
+    `
+);
+
+const store_b_customer_1_v3 = store_b_customer_1_v2.set(
+    `
+    {
+        "parent_sha": "${store_b_customer_1_v2.sha()}",
+        "name": "Alice Martin",
+        "email": "alice.personal@example.com"
+    }
+    `,
+    {
+        resolveConflict: async (conflict, resolveDefault) => {
+            if (!needsSpecialHandling(conflict)) {
+                return resolveDefault();
+            }
+
+            return chooseValue(
+                conflict.commonAncestor,
+                conflict.local,
+                conflict.incoming
+            );
+        }
+    }
+);
+
+await store_a_customer_1_v3.await.localCommit();
+await store_b_customer_1_v3.await.localCommit();
+
+// Notification: A's branch reaches the master first.
+// After verifying its ancestry, the master advances its local head.
+// This does not make A's branch a globally accepted winner.
+
+const store_master_customer_1_v3 = store_master_customer_1_v2.head();
+
+// Notification: the master learns B's branch and verifies its history.
+// It records a conflict with both versions and their common ancestor.
+// Its head remains on A's branch; B's content may still be held only by B.
+
+// Notification: B learns A's branch via the master and keeps its own head.
+// Notification: A learns B's branch via the master and keeps its own head.
+// Both stores retain the conflicting references and known content sources.
+
+// 4. RESOLUTION: B's set-specific callback handles this conflict locally.
+// needsSpecialHandling and chooseValue stand for application logic, not store APIs.
+// chooseValue returns a string proposal, including the History links for both branches.
+// The engine validates the proposal and records a new immutable resolution version.
+// Failure leaves the conflict open; the original v3 views never change.
+
+await store_b_customer_1_v3.await.resolved({ by: store_b });
+const store_b_customer_1_v4 = store_b_customer_1_v3.head();
+
+// Notification: the master receives and validates B's resolution of both branches.
+// Replicating the content alone does not imply that the conflict is resolved there.
+await store_b_customer_1_v4.await.contentReplicated({ to: store_master });
+await store_b_customer_1_v3.await.resolved({ by: store_master });
+const store_master_customer_1_v4 = store_master_customer_1_v3.head();
+
+// Notification: A receives the resolution through the master and validates it.
+await store_b_customer_1_v3.await.resolved({ by: store_a });
+const store_a_customer_1_v4 = store_a_customer_1_v3.head();
+
+// Both reads address B's held v4, not a subsequent head.
+const store_b_customer_1_data_v4 = store_b_customer_1_v4.data();
+const store_b_customer_1_raw_v4 = store_b_customer_1_v4.rawData();

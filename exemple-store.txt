@@ -1,0 +1,90 @@
+// TODO (point 8): Hash the entire supplied string for now, without excluding fields.
+// Decide the hash algorithm, string-to-byte encoding, and any future adapters.
+
+store = open_store("customers")
+
+definition_type = store.get<DocumentDescriptor>()
+
+definition = store.create_document(type: definition_type)
+
+definition_v1 = definition.set(
+    """
+    {
+        "guid": "${definition.guid}",
+        "parent_sha": null,
+        "traits": ["History"],
+        "fields": {
+            "name": "String",
+            "email": "String"
+        }
+    }
+    """
+)
+
+definition_v2 = definition_v1.set(
+    """
+    {
+        "guid": "${definition.guid}",
+        "parent_sha": "${definition_v1.sha()}",
+        "traits": ["History"],
+        "fields": {
+            "name": "String",
+            "email": "String",
+            "phone": "OptionalString"
+        },
+        "migration": {
+            "from": "${definition_v1.sha()}",
+            "function": "migrate_v1_to_v2"
+        }
+    }
+    """
+)
+
+customer = store.create_document(type: definition_v2)
+
+customer_v1 = customer.set(
+    """
+    {
+        "parent_sha": null,
+        "name": "Alice Martin",
+        "email": "alice@example.com"
+    }
+    """
+)
+
+customer_v2 = customer_v1.set(
+    """
+    {
+        "parent_sha": "${customer_v1.sha()}",
+        "name": "Alice Martin",
+        "email": "alice.martin@example.com"
+    }
+    """
+)
+
+customer_v3 = customer_v2.set(
+    """
+    {
+        "parent_sha": "${customer_v2.sha()}",
+        "name": "Alice Martin",
+        "email": "alice.martin@example.com",
+        "phone": null
+    }
+    """
+)
+
+customer_version_3 = customer_v3
+customer_version_2 = customer_version_3.previous()
+customer_version_1 = customer_version_2.previous()
+customer_head_3 = customer_version_1.head()
+
+customer_sha_3 = customer_version_3.sha()
+customer_sha_2 = customer_version_2.sha()
+customer_sha_1 = customer_version_1.sha()
+
+customer_state_3 = customer_version_3.data()
+customer_state_2 = customer_version_2.data()
+customer_state_1 = customer_version_1.data()
+customer_raw_3 = customer_version_3.rawData()
+definition_state_2 = definition_v2.data()
+definition_raw_2 = definition_v2.rawData()

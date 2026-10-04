@@ -1,0 +1,136 @@
+// FIRST DRAFT: LOCAL TRANSACTIONS
+// Proposed API and guarantees, not an implemented or approved contract.
+// Account definitions and two distinct documents already exist in this store.
+// Balances are integer cents in the same currency; History is supported.
+// data() decodes the held version using its exact definition.
+// rawData() returns the exact stored string; bytes in the future.
+// set() still accepts raw strings; decoding contracts remain to be specified.
+// JSON is an application format, not a store requirement.
+
+const store = open_store("accounts");
+const sender_v1 = store.get<Account>(sender_guid);
+const recipient_v1 = store.get<Account>(recipient_guid);
+const amount_cents = 2500;
+
+// TRANSACTION
+// transaction.get() binds documents to one coherent local snapshot.
+// Reads do not follow subsequent head changes, including between these two gets.
+// The transaction tracks every document read, including read-only documents.
+// Transaction-bound set() stages a version without publishing a local head.
+// Membership is explicit: documents retrieved from the store remain outside
+// this transaction, even when their set() is called inside the callback.
+// Keep this distinction visible; no automatic attachment or write prohibition
+// is selected for ordinary documents.
+// Every write is tracked automatically; the callback returns no document list.
+// This transfer scenario checks all read heads and aborts on conflict.
+// Those are scenario choices, not universal isolation or resolution rules.
+// Policy selection and composition across types, documents, and transactions
+// remain open; per-document resolutions must preserve transaction invariants.
+
+const transfer = await store.transaction((transaction) => {
+    const sender = transaction.get<Account>(sender_v1.guid);
+    const recipient = transaction.get<Account>(recipient_v1.guid);
+
+    if (sender.guid === recipient.guid) {
+        throw new Error("Transfer requires two distinct accounts");
+    }
+
+    const sender_state = sender.data();
+    const recipient_state = recipient.data();
+
+    if (sender_state.currency !== recipient_state.currency) {
+        throw new Error("Account currencies must match");
+    }
+
+    if (!Number.isSafeInteger(amount_cents) || amount_cents <= 0) {
+        throw new Error("Transfer amount must be positive integer cents");
+    }
+
+    if (!Number.isSafeInteger(sender_state.balance_cents) ||
+        !Number.isSafeInteger(recipient_state.balance_cents) ||
+        sender_state.balance_cents < 0 || recipient_state.balance_cents < 0) {
+        throw new Error("Account balances must be nonnegative integer cents");
+    }
+
+    if (sender_state.balance_cents < amount_cents) {
+        throw new Error("Insufficient funds");
+    }
+
+    const recipient_balance_cents = recipient_state.balance_cents + amount_cents;
+
+    if (!Number.isSafeInteger(recipient_balance_cents)) {
+        throw new Error("Recipient balance exceeds the supported range");
+    }
+
+    // Preserve the other fields from sender_state; only changed fields are shown.
+    sender.set(
+        `
+        {
+            "parent_sha": "${sender.sha()}",
+            "balance_cents": ${sender_state.balance_cents - amount_cents}
+        }
+        `
+    );
+
+    // Preserve the other fields from recipient_state; only changed fields are shown.
+    recipient.set(
+        `
+        {
+            "parent_sha": "${recipient.sha()}",
+            "balance_cents": ${recipient_balance_cents}
+        }
+        `
+    );
+
+});
+
+// SUCCESS
+// Normal callback completion requests commit; it does not itself publish writes.
+// The engine validates the candidate values against their exact definitions.
+// In this scenario, it atomically checks every read document's snapshot head
+// and publishes all staged heads together, or publishes none of them.
+// await store.transaction(...) yields a commit result only after success.
+// It records every modified document automatically, without a callback return.
+// Its changes collection is iterable, with one entry per modified document.
+// Each entry exposes a proposed kind and the final committed document view,
+// not a subsequent head. This example contains only "updated" entries.
+// Read-only documents are tracked separately, not listed as modifications.
+// sender_v1 and recipient_v1 remain unchanged, even if newer heads existed
+// when the transaction took its snapshot.
+
+for (const change of transfer.changes) {
+    const kind = change.kind;
+    const document = change.document;
+    const committed_data = document.data();
+    const committed_raw = document.rawData();
+}
+
+// FAILURE AND CONCURRENCY
+// In this scenario, a callback error, invalid value, or changed read head rejects it.
+// A concurrent write after the snapshot to either account therefore aborts it.
+// No staged write becomes a head, is announced, or invokes a per-document merge.
+// Other writers' committed changes are not rolled back.
+// There is no automatic retry; the caller can explicitly start a new transaction.
+// Keep external effects out of the callback: they cannot be rolled back.
+// Staged views must not escape the callback through other application state.
+// Cleanup of unreferenced immutable content after abort remains unspecified.
+
+// SCOPE AND OPEN CHOICES
+// Atomic publication does not make separate ordinary get() calls a snapshot:
+// a commit between them can still produce a mixed pair of reads.
+// Durable commit and transaction-wide await milestones remain unspecified.
+// Replication must not apply one member independently if it promises the same
+// invariant remotely; its grouping protocol and conflict policy are deferred.
+// This local transaction does not provide distributed agreement or a global lock.
+// Creation, deletion, queries, nested transactions, and async callbacks are deferred.
+
+// OPEN API DESIGN
+// Retain the callback boundary provisionally; prioritize clarity and misuse prevention.
+// Define the change categories and how read-only dependencies can be inspected.
+// Store queries after commit read current heads, not necessarily these committed versions.
+// Repeated get/set calls within a transaction remain open.
+// Data calculations and changes triggered by ordinary set(), outside transactions,
+// will be designed separately. At that time, revisit their transactional behavior:
+// waiting for completion, subsequent reads, automatic tracking, atomicity, and failure.
+// No settle() API or triggered-operation timing contract is selected now.
+// Define policy selection and compatibility without imposing one rule on all uses.
